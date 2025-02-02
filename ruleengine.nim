@@ -1,9 +1,10 @@
 when compileOption("profiler"):
   import std/nimprof
-import std/[tables, sequtils, monotimes, times, strutils, algorithm]
+
+import std/[tables, sequtils, monotimes, times, strutils, algorithm, enumerate]
 
 type 
-    Operation {.size : 1} = enum
+    Operation {.size: 1.} = enum
         opInvalid, opNoop, opPassthrough, opLowercase, opUppercase, opCapitalize, opInvCapitalize, opToggleCase,
         opToggleAt, opReverse, opDuplicate, opDuplicateN, opReflect, opRotLeft, opRotRight,
         opAppend, opPrepend, opTruncLeft, opTruncRight, opDeleteAt, opExtractRange, opOmitRange, opInsertAt,
@@ -25,8 +26,6 @@ type
         arg3: char
 
 
-# I don't know if it's actually faster to construct a lookup table instead of just using a table of char -> int, but let's make a LUT anyway
-# TODO: benchmark against regular table
 const opLUT = block:
     var result: array[256, Operation]
 
@@ -58,19 +57,45 @@ const opLUT = block:
 
     result
 
-proc chrToInt(c: char): int8 =
+# Those LUTs seem to be faster than those branchless versions I use to fill the table or built-in Nim functions
+const toggleCaseLUT = block:
+    var result: array[256, char]
+
+    for i in 0..255:
+        result[i] = chr(uint8(result[i]) xor (uint8( ( (uint8(result[i]) or 0x20'u8) - ord('a') ) < 26 ) shl 5 ))
+
+    result
+
+const lowerCaseLUT = block:
+    var result: array[256, char]
+
+    for i in 0..255:
+        result[i] = chr(uint8(result[i]) + (uint8(uint8(result[i]) >= uint8('A') and uint8(result[i]) <= uint8('Z')) shl 5))
+
+    result
+
+const upperCaseLUT = block:
+    var result: array[256, char]
+
+    for i in 0..255:
+        result[i] = chr(uint8(result[i]) - (uint8(uint8(result[i]) >= uint8('a') and uint8(result[i]) <= uint8('z')) shl 5))
+
+    result
+
+
+proc chrToInt(c: char): uint8 =
     case c
     of '0'..'9':
-        return int8(c) - int8('0')
+        return uint8(c) - uint8('0')
     of 'A'..'Z':
-        return int8(c) - int8('A') + 10
+        return uint8(c) - uint8('A') + 10
     else:
         return 0
 
 
 proc tokenizeRule*(rule: string): seq[Token] = 
     var pos = 0
-    while pos < len(rule) and rule[pos] != '#' and len(result) < 31: # 31 is the maximum amount of rules supported in hashcat
+    while pos < len(rule) and rule[pos] != '#' and len(result) < 31: # 31 is the maximum amount of operations in a single rule supported in hashcat
         let op = opLUT[uint8(rule[pos])]
         case op
 
@@ -89,30 +114,57 @@ proc tokenizeRule*(rule: string): seq[Token] =
             result.add Token(op: op, arg1: '\0', arg2: '\0', arg3: '\0')
             pos += 1
 
-        of opToggleAt, opDuplicateN, opAppend, opPrepend, opDeleteAt, opTruncAt, opPurge, opDupFirst,
-           opDupLast, opRejectLess, opRejectGreater, opRejectEqual, opRejectContain, opRejectNotContain,
-           opRejectEqualFirst, opRejectEqualLast, opBitwiseShiftLeft, opBitwiseShiftRight, opAsciiInc,
-           opAsciiDec, opReplaceNMinus1, opReplaceNPlus1, opDupBlockFront, opDupBlockBack, opTitleSep:
+        of opToggleAt, opDuplicateN, opDeleteAt, opTruncAt, opDupFirst, opDupLast, opRejectLess,
+           opRejectGreater, opRejectEqual, opBitwiseShiftLeft, opBitwiseShiftRight, opAsciiInc,
+           opAsciiDec, opReplaceNMinus1, opReplaceNPlus1, opDupBlockFront, opDupBlockBack:
 
-            if pos + 1 >= len(rule):
+            if unlikely(pos + 1 > high(rule)):
+                result.setLen(0)
+                return
+
+            result.add Token(op: op, arg1: chr(chrToInt(rule[pos+1])), arg2: '\0', arg3: '\0')
+            pos += 2
+        
+        of opAppend, opPrepend, opPurge, opRejectContain, opRejectNotContain,
+           opRejectEqualFirst, opRejectEqualLast, opTitleSep:
+
+            if unlikely(pos + 1 > high(rule)):
                 result.setLen(0)
                 return
 
             result.add Token(op: op, arg1: rule[pos+1], arg2: '\0', arg3: '\0')
             pos += 2
 
-        of opExtractRange, opOmitRange, opInsertAt, opOverwriteAt, opReplace, opRejectEqualAt,
-           opRejectContainsTimes, opSwapAt, opToggleSep:
+        of opExtractRange, opOmitRange, opSwapAt:
 
-            if pos + 2 >= len(rule):
+            if unlikely(pos + 2 >= len(rule)):
+                result.setLen(0)
+                return
+            
+            result.add Token(op: op, arg1: chr(chrToInt(rule[pos+1])), arg2: chr(chrToInt(rule[pos+2])), arg3: '\0')
+            pos += 3
+
+        of opInsertAt, opOverwriteAt, opRejectEqualAt, opRejectContainsTimes, opToggleSep:
+
+            if unlikely(pos + 2 >= len(rule)):
+                result.setLen(0)
+                return
+            
+            result.add Token(op: op, arg1: chr(chrToInt(rule[pos+1])), arg2: rule[pos+2], arg3: '\0')
+            pos += 3
+
+        of opReplace:
+
+            if unlikely(pos + 2 >= len(rule)):
                 result.setLen(0)
                 return
             
             result.add Token(op: op, arg1: rule[pos+1], arg2: rule[pos+2], arg3: '\0')
             pos += 3
 
+
         of opExtractMem:
-            if pos + 3 >= len(rule):
+            if unlikely(pos + 3 >= len(rule)):
                 result.setLen(0)
                 return
             
@@ -124,7 +176,7 @@ proc tokenizeRule*(rule: string): seq[Token] =
 proc tokenizeRules*(rules: seq[string]): seq[seq[Token]] =
     for rule in rules:
         let tokenizedRule = tokenizeRule(rule)
-        if tokenizedRule.len == 0:
+        if unlikely(tokenizedRule.len == 0):
             continue
 
         result.add(tokenizedRule)
@@ -140,34 +192,53 @@ proc applyRules*(rules: seq[seq[Token]], plains: seq[string]): seq[string] =
                 #echo "Processing token: ", token
                 case token.op
                 of opLowercase:
-                    mutatedPlain = mutatedPlain.toLowerAscii
+                    for i in 0..high(mutatedPlain):
+                        mutatedPlain[i] = lowerCaseLUT[uint8(mutatedPlain[i])]
                 of opUppercase:
-                    mutatedPlain = mutatedPlain.toUpperAscii
+                    for i in 0..high(mutatedPlain):
+                        mutatedPlain[i] = upperCaseLUT[uint8(mutatedPlain[i])]
                 of opCapitalize:
-                    mutatedPlain = mutatedPlain.toLowerAscii.capitalizeAscii
+                    if mutatedPlain.len == 0:
+                        continue
+
+                    for i in 0..high(mutatedPlain):
+                        mutatedPlain[i] = lowerCaseLUT[uint8(mutatedPlain[i])]
+
+                    mutatedPlain[0] = upperCaseLUT[uint8(mutatedPlain[0])]
                 of opInvCapitalize:
-                    if mutatedPlain.len <= 1:
-                        mutatedPlain = mutatedPlain.toLowerAscii
-                    else:
-                        mutatedPlain = mutatedPlain[0].toLowerAscii & mutatedPlain.toUpperAscii[1..^1]
+                    if mutatedPlain.len == 0:
+                        continue
+
+                    mutatedPlain[0] = lowerCaseLUT[uint8(mutatedPlain[0])]
+
+                    for i in 1..high(mutatedPlain):
+                        mutatedPlain[i] = upperCaseLUT[uint8(mutatedPlain[i])]
                 of opToggleCase:
                     for pos in 0..high(mutatedPlain):
-                        mutatedPlain[pos] = chr(uint8(mutatedPlain[pos]) xor (uint8( ( (uint8(mutatedPlain[pos]) or 0x20'u8) - ord('a') ) < 26 ) shl 5 ))
+                        mutatedPlain[pos] = toggleCaseLUT[uint8(mutatedPlain[pos])]
                 of opToggleAt:
-                    let pos = chrToInt(token.arg1)
+                    let pos = int(token.arg1)
                     if pos > mutatedPlain.high:
                         continue
 
-                    mutatedPlain[pos] = chr(uint8(mutatedPlain[pos]) xor (uint8( ( (uint8(mutatedPlain[pos]) or 0x20'u8) - ord('a') ) < 26 ) shl 5 ))
+                    mutatedPlain[pos] = toggleCaseLUT[uint8(mutatedPlain[pos])]
                 of opReverse:
                     reverse(mutatedPlain)
                 of opDuplicate:
                     mutatedPlain.add mutatedPlain
                 of opDuplicateN:
-                    let n = chrToInt(token.arg1)
+                    if mutatedPlain.len == 0:
+                        continue
+
+                    let n = int(token.arg1)
                     mutatedPlain.add repeat(mutatedPlain, n)
                 of opReflect:
-                    mutatedPlain.add reversed(mutatedPlain).join
+                    if mutatedPlain.len == 0:
+                        continue
+
+                    var reversed = mutatedPlain
+                    reverse(reversed)
+                    mutatedPlain.add reversed
                 of opRotLeft:
                     if mutatedPlain.len > 1:
                         mutatedPlain = mutatedPlain[1..^1] & mutatedPlain[0]
@@ -175,7 +246,7 @@ proc applyRules*(rules: seq[seq[Token]], plains: seq[string]): seq[string] =
                     if mutatedPlain.len > 1:
                         mutatedPlain = mutatedPlain[^1] & mutatedPlain[0..^2]
                 of opAppend:
-                    mutatedPlain = mutatedPlain & token.arg1
+                    mutatedPlain.add token.arg1
                 of opPrepend:
                     mutatedPlain = token.arg1 & mutatedPlain
                 of opTruncLeft:
@@ -187,26 +258,29 @@ proc applyRules*(rules: seq[seq[Token]], plains: seq[string]): seq[string] =
                     if mutatedPlain.len > 0:
                         mutatedPlain.setLen(mutatedPlain.len - 1)
                 of opDeleteAt:
-                    let pos = int(chrToInt(token.arg1))
+                    let pos = int(token.arg1)
                     if pos > mutatedPlain.high:
                         continue
 
                     delete(mutatedPlain, pos..pos)
                 of opExtractRange:
-                    let pos = chrToInt(token.arg1)
-                    let count = chrToInt(token.arg2)
+                    let pos = int(token.arg1)
+                    let count = int(token.arg2)
                     if pos+count > mutatedPlain.len:
                         continue
                     mutatedPlain = mutatedPlain[pos..<pos+count]
                 of opOmitRange:
-                    let pos = int(chrToInt(token.arg1))
-                    let count = chrToInt(token.arg2)
+                    if mutatedPlain.len == 0:
+                        continue
+
+                    let pos = int(token.arg1)
+                    let count = int(token.arg2)
                     if pos+count > mutatedPlain.len:
                         continue
 
                     delete(mutatedPlain, pos..<pos+count)
                 of opInsertAt:
-                    let pos = chrToInt(token.arg1)
+                    let pos = int(token.arg1)
                     if pos > mutatedPlain.len:
                         continue
 
@@ -223,13 +297,13 @@ proc applyRules*(rules: seq[seq[Token]], plains: seq[string]): seq[string] =
                     mutatedPlain[pos] = token.arg2
                     # insert(mutatedPlain, $token.arg2, pos)
                 of opOverwriteAt:
-                    let pos = chrToInt(token.arg1)
+                    let pos = int(token.arg1)
                     if pos > mutatedPlain.high:
                         continue
 
                     mutatedPlain[pos] = token.arg2
                 of opTruncAt:
-                    let pos = chrToInt(token.arg1)
+                    let pos = int(token.arg1)
                     if pos > mutatedPlain.len:
                         continue
 
@@ -237,20 +311,33 @@ proc applyRules*(rules: seq[seq[Token]], plains: seq[string]): seq[string] =
                 of opReplace:
                     mutatedPlain = mutatedPlain.replace(token.arg1, token.arg2)
                 of opPurge:
-                    mutatedPlain = mutatedPlain.replace($token.arg1, "")
+                    if mutatedPlain.len == 0:
+                        continue
+
+                    var newPlain = newStringUninit(mutatedPlain.len)
+                    var newPos = 0
+                    for c in mutatedPlain:
+                        if c != token.arg1:
+                            newPlain[newPos] = c
+                            inc newPos
+                    newPlain.setLen(newPos)
+                    mutatedPlain = newPlain
                 of opDupFirst:
                     if mutatedPlain.len == 0:
                         continue
 
-                    let count = chrToInt(token.arg1)
+                    let count = int(token.arg1)
                     mutatedPlain = repeat(mutatedPlain[0], count) & mutatedPlain
                 of opDupLast:
                     if mutatedPlain.len == 0:
                         continue
                     
-                    let count = chrToInt(token.arg1)
+                    let count = int(token.arg1)
                     mutatedPlain = mutatedPlain & repeat(mutatedPlain[^1], count)
                 of opDupAll:
+                    if mutatedPlain.len == 0:
+                        continue
+
                     var dupPlain = newStringUninit(mutatedPlain.len * 2)
                     var ipos, opos: int
                     while ipos < len(mutatedPlain):
@@ -274,8 +361,11 @@ proc applyRules*(rules: seq[seq[Token]], plains: seq[string]): seq[string] =
                     mutatedPlain[^1] = mutatedPlain[^2]
                     mutatedPlain[^2] = t
                 of opSwapAt:
-                    let pos1 = chrToInt(token.arg1)
-                    let pos2 = chrToInt(token.arg2)
+                    if mutatedPlain.len < 2:
+                        continue
+
+                    let pos1 = int(token.arg1)
+                    let pos2 = int(token.arg2)
 
                     if pos1 > mutatedPlain.high or pos2 > mutatedPlain.high:
                         continue
@@ -284,81 +374,84 @@ proc applyRules*(rules: seq[seq[Token]], plains: seq[string]): seq[string] =
                     mutatedPlain[pos1] = mutatedPlain[pos2]
                     mutatedPlain[pos2] = t
                 of opBitwiseShiftLeft:
-                    let pos = chrToInt(token.arg1)
+                    let pos = int(token.arg1)
                     if pos > mutatedPlain.high:
                         continue
 
                     mutatedPlain[pos] = chr(uint8(mutatedPlain[pos]) shl 1)
                 of opBitwiseShiftRight:
-                    let pos = chrToInt(token.arg1)
+                    let pos = int(token.arg1)
                     if pos > mutatedPlain.high:
                         continue
 
                     mutatedPlain[pos] = chr(uint8(mutatedPlain[pos]) shr 1)
                 of opAsciiInc:
-                    let pos = chrToInt(token.arg1)
+                    let pos = int(token.arg1)
                     if pos > mutatedPlain.high:
                         continue
 
                     mutatedPlain[pos] = chr(uint8(mutatedPlain[pos]) + 1)
                 of opAsciiDec:
-                    let pos = chrToInt(token.arg1)
+                    let pos = int(token.arg1)
                     if pos > mutatedPlain.high:
                         continue
 
                     mutatedPlain[pos] = chr(uint8(mutatedPlain[pos]) - 1)
                 of opReplaceNPlus1:
-                    let pos = chrToInt(token.arg1)
+                    let pos = int(token.arg1)
                     if pos >= mutatedPlain.high:
                         continue
 
                     mutatedPlain[pos] = mutatedPlain[pos + 1]
                 of opReplaceNMinus1:
-                    let pos = chrToInt(token.arg1)
+                    let pos = int(token.arg1)
                     if pos == 0 or pos > mutatedPlain.high:
                         continue
 
                     mutatedPlain[pos] = mutatedPlain[pos - 1]
                 of opDupBlockFront:
-                    let count = chrToInt(token.arg1)
+                    let count = int(token.arg1)
                     if count > mutatedPlain.len:
                         continue
 
                     mutatedPlain = mutatedPlain[0..<count] & mutatedPlain
                 of opDupBlockBack:
-                    let count = chrToInt(token.arg1)
+                    let count = int(token.arg1)
                     if count > mutatedPlain.len:
                         continue
                     
                     mutatedPlain.add mutatedPlain[^count..^1]
                 of opTitle, opTitleSep:
-                    var sep: char
-                    if token.op == opTitle:
-                        sep = ' '
-                    else:
-                        sep = token.arg1
+                    if mutatedPlain.len == 0:
+                        continue
 
-                    mutatedPlain = mutatedPlain.toLowerAscii.capitalizeAscii
+                    let sep = [' ', token.arg1][ord(token.op) - ord(opTitle)]
+
+                    #mutatedPlain = mutatedPlain.toLowerAscii
+                    for i in 0..high(mutatedPlain):
+                        mutatedPlain[i] = lowerCaseLUT[uint8(mutatedPlain[i])]
+                    
+                    mutatedPlain[0] = upperCaseLUT[uint8(mutatedPlain[0])]
                     var pos = 0
                     while true:
                         pos = mutatedPlain.find(sep, pos)
-                        if pos == -1:
+                        if likely(pos == -1):
                             break
                         
-                        mutatedPlain[pos + 1] = mutatedPlain[pos + 1].toUpperAscii
+                        mutatedPlain[pos + 1] = upperCaseLUT[uint8(mutatedPlain[pos + 1])]
                         inc pos
                 of opToggleSep:
-                    let target_n = chrToInt(token.arg1)
+                    let target_n = int(token.arg1)
                     var current_n = -1
                     var pos = 0
                     while true:
                         pos = mutatedPlain.find(token.arg2, pos)
-                        if pos == -1:
+                        if likely(pos == -1):
                             break
                         
                         current_n += 1
                         if current_n == target_n:
-                            mutatedPlain[pos + 1] = chr(uint8(mutatedPlain[pos + 1]) xor (uint8( ( (uint8(mutatedPlain[pos + 1]) or 0x20'u8) - ord('a') ) < 26 ) shl 5 ))
+                            mutatedPlain[pos + 1] = toggleCaseLUT[uint8(mutatedPlain[pos + 1])]
                             break
 
                         inc pos
@@ -374,7 +467,7 @@ proc main() =
     #var line: string
     #while readLine(stdin, line):
     #    echo applyRules(@[tokenizeRule(line)], @["p@ss-w0-rd123 "])
-    var rules = lines("A:\\Coding Projects\\Other\\hashcat-log-rules\\other-rules\\dedup.rule").toSeq
+    var rules = lines("dedup.rule").toSeq
 
     var beginTime = getMonoTime()
     var tokenizedRules = tokenizeRules(rules)
@@ -384,10 +477,11 @@ proc main() =
 
     for i in 1..10:
         beginTime = getMonoTime()
-        var plains = applyRules(tokenizedRules, @["P@s$ w0rD-123!"])
+        var plains = applyRules(tokenizedRules, @["P@s$ w0rD-123!", "123456789joao", "andreas_walter_"])
         endTime = getMonoTime()
 
         echo "Spent on applying rules: ", (endTime - beginTime).inMilliseconds, " milliseconds"
+        echo int(plains.len / (endTime - beginTime).inMilliseconds * 1000), " candidates/s"
 
 
 main()
