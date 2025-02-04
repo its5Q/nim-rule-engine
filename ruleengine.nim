@@ -1,101 +1,8 @@
 when compileOption("profiler"):
   import std/nimprof
 
-import std/[tables, sequtils, monotimes, times, strutils, algorithm, enumerate]
-
-type 
-    Operation {.size: 1.} = enum
-        opInvalid, opNoop, opPassthrough, opLowercase, opUppercase, opCapitalize, opInvCapitalize, opToggleCase,
-        opToggleAt, opReverse, opDuplicate, opDuplicateN, opReflect, opRotLeft, opRotRight,
-        opAppend, opPrepend, opTruncLeft, opTruncRight, opDeleteAt, opExtractRange, opOmitRange, opInsertAt,
-        opOverwriteAt, opTruncAt, opReplace, opPurge, opDupFirst, opDupLast, opDupAll, opSwapFront, opSwapBack,
-        opSwapAt, opBitwiseShiftLeft, opBitwiseShiftRight, opAsciiInc, opAsciiDec, opReplaceNPlus1,
-        opReplaceNMinus1, opDupBlockFront, opDupBlockBack, opTitle, opTitleSep, opToggleSep,
-        
-        # Not supported (just like in hashcat with a rule-based attack on a GPU, keeping them for correct tokenization)
-        opRejectLess, opRejectGreater, opRejectEqual, opRejectContain, opRejectNotContain, opRejectEqualFirst,
-        opRejectEqualLast, opRejectEqualAt, opRejectContainsTimes, opRejectContainsMemory,
-        opExtractMem, opAppendMem, opPrependMem, opMemorize
-
-type 
-    ArgType {.size: 1.} = enum
-        argInt
-        argChar
-        argNone
-
-type
-    Token = object
-        op: Operation
-        arg1: char
-        arg2: char
-        arg3: char
-
-
-const opTable = {
-    ':': opPassthrough,         'l': opLowercase,            'u': opUppercase,
-    'c': opCapitalize,          'C': opInvCapitalize,        't': opToggleCase,
-    'T': opToggleAt,            'r': opReverse,              'd': opDuplicate,
-    'p': opDuplicateN,          'f': opReflect,              '{': opRotLeft,
-    '}': opRotRight,            '$': opAppend,               '^': opPrepend,
-    '[': opTruncLeft,           ']': opTruncRight,           'D': opDeleteAt,
-    'x': opExtractRange,        'O': opOmitRange,            'i': opInsertAt,
-    'o': opOverwriteAt,         '\'': opTruncAt,             's': opReplace,
-    '@': opPurge,               'z': opDupFirst,             'Z': opDupLast,
-    'q': opDupAll,              'X': opExtractMem,           '4': opAppendMem,
-    '6': opPrependMem,          'M': opMemorize,             '<': opRejectLess,
-    '>': opRejectGreater,       '_': opRejectEqual,          '!': opRejectContain,
-    '/': opRejectNotContain,    '(': opRejectEqualFirst,     ')': opRejectEqualLast,
-    '=': opRejectEqualAt,       '%': opRejectContainsTimes,  'Q': opRejectContainsMemory,
-    'k': opSwapFront,           'K': opSwapBack,             '*': opSwapAt,
-    'L': opBitwiseShiftLeft,    'R': opBitwiseShiftRight,    '+': opAsciiInc,
-    '-': opAsciiDec,            '.': opReplaceNPlus1,        ',': opReplaceNMinus1,
-    'y': opDupBlockFront,       'Y': opDupBlockBack,         'E': opTitle, 
-    'e': opTitleSep,            '3': opToggleSep,            ' ': opNoop
-}.toTable
-
-
-const opLUT = block:
-    var result: array[256, Operation]
-
-    for i in 0..255:
-        result[i] = opTable.getOrDefault(chr(i), opInvalid)
-
-    result
-
-const opDecLUT = block:
-    var result: array[256, char]
-
-    for i in 0..255:
-        result[int(opTable.getOrDefault(chr(i), opInvalid))] = chr(i)
-
-    result    
-
-# Those LUTs seem to be faster than those branchless versions I use to fill the table or built-in Nim functions
-const toggleCaseLUT = block:
-    var result: array[256, char]
-
-    for i in 0..255:
-        result[i] = chr(uint8(i) xor (uint8( ( (uint8(i) or 0x20'u8) - ord('a') ) < 26 ) shl 5 ))
-
-    result
-
-const lowerCaseLUT = block:
-    var result: array[256, char]
-
-    for i in 0..255:
-        result[i] = chr(uint8(i) + (uint8(uint8(i) >= uint8('A') and uint8(i) <= uint8('Z')) shl 5))
-
-    result
-
-const upperCaseLUT = block:
-    var result: array[256, char]
-
-    for i in 0..255:
-        result[i] = chr(uint8(i) - (uint8(uint8(i) >= uint8('a') and uint8(i) <= uint8('z')) shl 5))
-
-    result
-
-const MAX_LENGTH = 255 # Default in hashcat --stdout
+include constants
+import std/[sequtils, monotimes, times, strutils, algorithm, enumerate]
 
 proc chrToInt(c: char): int {.inline.} =
     case c
@@ -128,49 +35,16 @@ proc tokenizeRule*(rule: string, includeUnsupported: bool = true): seq[Token] =
 
     while pos < len(rule) and len(result) < 31: # 31 is the maximum number of operations in a single rule supported in hashcat
         let op = opLUT[uint8(rule[pos])]
-        case op
-        of opInvalid:
+
+        (argCount, argTypes) = getOpConfig(op)
+        inc pos
+
+        if argCount == -1:
+            continue
+        elif unlikely(argCount == -2):
             result.setLen(0)
             return
-
-        of opNoop:
-            inc pos
-            continue
-
-        of opPassthrough, opLowercase, opUppercase, opCapitalize, opInvCapitalize, opToggleCase,
-           opReverse, opDuplicate, opReflect, opRotLeft, opRotRight, opTruncLeft, opTruncRight,
-           opDupAll, opSwapBack, opSwapFront, opTitle, opAppendMem, opPrependMem, opMemorize,
-           opRejectContainsMemory:
-
-            argCount = 0
-
-        of opToggleAt, opDuplicateN, opDeleteAt, opTruncAt, opDupFirst, opDupLast, opBitwiseShiftLeft,
-           opBitwiseShiftRight, opAsciiInc, opAsciiDec, opReplaceNMinus1, opReplaceNPlus1, 
-           opDupBlockFront, opDupBlockBack, opRejectLess, opRejectGreater, opRejectEqual:
-            argCount = 1
-            argTypes = [argInt, argNone, argNone]
         
-        of opAppend, opPrepend, opPurge, opTitleSep, opRejectContain, opRejectNotContain, opRejectEqualFirst, opRejectEqualLast:
-            argCount = 1
-            argTypes = [argChar, argNone, argNone]
-
-        of opExtractRange, opOmitRange, opSwapAt:
-            argCount = 2
-            argTypes = [argInt, argInt, argNone]
-
-        of opInsertAt, opOverwriteAt, opToggleSep, opRejectEqualAt, opRejectContainsTimes:
-            argCount = 2
-            argTypes = [argInt, argChar, argNone]
-
-        of opReplace:
-            argCount = 2
-            argTypes = [argChar, argChar, argNone]        
-
-        of opExtractMem:
-            argCount = 3
-            argTypes = [argChar, argChar, argChar]
-
-        inc pos
         args = ['\0', '\0', '\0']
         for argN in 0..<argCount:
             if pos > high(rule):
@@ -204,8 +78,6 @@ proc tokenizeRule*(rule: string, includeUnsupported: bool = true): seq[Token] =
         result.add Token(op: op, arg1: args[0], arg2: args[1], arg3: args[2])
 
 
-
-
 # Separate function for multiple rules to eliminate overhead when calling from Python
 proc tokenizeRules*(rules: seq[string], includeUnsupported: bool = true): seq[seq[Token]] =
     for i, rule in enumerate(rules):
@@ -228,49 +100,15 @@ proc decodeRules*(rules: seq[seq[Token]]): seq[string] =
             if strRule.len > 0:
                 strRule.add ' '
 
-            case token.op
-            of opInvalid:
-                strRule = ""
+            (argCount, argTypes) = getOpConfig(token.op)
+
+            if argCount == -1:
+                continue
+            elif unlikely(argCount == -2):
+                strRule.setLen(0)
                 break
 
-            of opNoop:
-                continue
-
-            of opPassthrough, opLowercase, opUppercase, opCapitalize, opInvCapitalize, opToggleCase,
-                opReverse, opDuplicate, opReflect, opRotLeft, opRotRight, opTruncLeft, opTruncRight,
-                opDupAll, opSwapBack, opSwapFront, opTitle, opAppendMem, opPrependMem, opMemorize,
-                opRejectContainsMemory:
-
-                argCount = 0
-
-            of opToggleAt, opDuplicateN, opDeleteAt, opTruncAt, opDupFirst, opDupLast, opBitwiseShiftLeft,
-                opBitwiseShiftRight, opAsciiInc, opAsciiDec, opReplaceNMinus1, opReplaceNPlus1, 
-                opDupBlockFront, opDupBlockBack, opRejectLess, opRejectGreater, opRejectEqual:
-                argCount = 1
-                argTypes = [argInt, argNone, argNone]
-            
-            of opAppend, opPrepend, opPurge, opTitleSep, opRejectContain, opRejectNotContain, opRejectEqualFirst, opRejectEqualLast:
-                argCount = 1
-                argTypes = [argChar, argNone, argNone]
-
-            of opExtractRange, opOmitRange, opSwapAt:
-                argCount = 2
-                argTypes = [argInt, argInt, argNone]
-
-            of opInsertAt, opOverwriteAt, opToggleSep, opRejectEqualAt, opRejectContainsTimes:
-                argCount = 2
-                argTypes = [argInt, argChar, argNone]
-
-            of opReplace:
-                argCount = 2
-                argTypes = [argChar, argChar, argNone]        
-
-            of opExtractMem:
-                argCount = 3
-                argTypes = [argChar, argChar, argChar]
-
             strRule.add opDecLUT[int(token.op)]
-            
             args = [token.arg1, token.arg2, token.arg3]
 
             for i in 0..<argCount:
