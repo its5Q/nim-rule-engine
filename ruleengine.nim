@@ -89,7 +89,7 @@ const upperCaseLUT = block:
 
 const MAX_LENGTH = 255 # Default in hashcat --stdout
 
-proc chrToInt(c: char): int =
+proc chrToInt(c: char): int {.inline.} =
     case c
     of '0'..'9':
         return int(uint8(c) - uint8('0'))
@@ -214,7 +214,7 @@ proc applyRule*(rule: seq[Token], mutatedPlain: var string) =
             if mutatedPlain.len == 0:
                 continue
 
-            for i in 0..high(mutatedPlain):
+            for i in 1..high(mutatedPlain):
                 mutatedPlain[i] = lowerCaseLUT[uint8(mutatedPlain[i])]
 
             mutatedPlain[0] = upperCaseLUT[uint8(mutatedPlain[0])]
@@ -257,25 +257,36 @@ proc applyRule*(rule: seq[Token], mutatedPlain: var string) =
 
             mutatedPlain.add repeat(mutatedPlain, n)
         of opReflect:
-            if mutatedPlain.len == 0 or mutatedPlain.len * 2 > MAX_LENGTH:
-                continue
+            let l = mutatedPlain.len
+            if l == 0 or l * 2 > MAX_LENGTH:
+                continue            
 
-            var reversed = mutatedPlain
-            reverse(reversed)
-            mutatedPlain.add reversed
+            mutatedPlain.setLen(l * 2)
+            for i in 0..<l:
+                mutatedPlain[^(i + 1)] = mutatedPlain[i]
         of opRotLeft:
             if mutatedPlain.len > 1:
-                mutatedPlain = mutatedPlain[1..^1] & mutatedPlain[0]
+                let c = mutatedPlain[0]
+                for i in 1..high(mutatedPlain):
+                    mutatedPlain[i - 1] = mutatedPlain[i]
+                mutatedPlain[^1] = c
         of opRotRight:
             if mutatedPlain.len > 1:
-                mutatedPlain = mutatedPlain[^1] & mutatedPlain[0..^2]
+                let c = mutatedPlain[^1]
+                for i in countdown(high(mutatedPlain) - 1, 0):
+                    mutatedPlain[i + 1] = mutatedPlain[i]
+                mutatedPlain[0] = c
         of opAppend:
             mutatedPlain.add token.arg1
         of opPrepend:
             mutatedPlain = token.arg1 & mutatedPlain
         of opTruncLeft:
             if mutatedPlain.len > 1:
-                mutatedPlain = mutatedPlain[1..^1]
+                for i in 1..high(mutatedPlain):
+                    mutatedPlain[i - 1] = mutatedPlain[i]
+
+                mutatedPlain.setLen(mutatedPlain.len - 1)
+                # mutatedPlain = mutatedPlain[1..^1]
             else:
                 mutatedPlain.setLen(0)
         of opTruncRight:
@@ -286,13 +297,22 @@ proc applyRule*(rule: seq[Token], mutatedPlain: var string) =
             if pos > mutatedPlain.high:
                 continue
 
-            delete(mutatedPlain, pos..pos)
+            for i in pos..<high(mutatedPlain):
+                mutatedPlain[i] = mutatedPlain[i + 1]
+
+            mutatedPlain.setLen(mutatedPlain.len - 1)
+
+            # delete(mutatedPlain, pos..pos)
         of opExtractRange:
             let pos = int(token.arg1)
             let count = int(token.arg2)
             if pos+count > mutatedPlain.len:
                 continue
-            mutatedPlain = mutatedPlain[pos..<pos+count]
+            
+            if pos == 0:
+                mutatedPlain.setLen(count)
+            else:
+                mutatedPlain = mutatedPlain[pos..<pos+count]
         of opOmitRange:
             if mutatedPlain.len == 0:
                 continue
@@ -330,22 +350,32 @@ proc applyRule*(rule: seq[Token], mutatedPlain: var string) =
             let pos = int(token.arg1)
             if pos > mutatedPlain.len:
                 continue
-
+            
+            # mutatedPlain.setLen(pos) it's slower there for some reason, but not in opExtractRange??
             mutatedPlain = mutatedPlain[0..<pos]
         of opReplace:
-            mutatedPlain = mutatedPlain.replace(token.arg1, token.arg2)
+            for i in 0..high(mutatedPlain):
+                if mutatedPlain[i] == token.arg1:
+                    mutatedPlain[i] = token.arg2
         of opPurge:
             if mutatedPlain.len == 0:
                 continue
 
-            var newPlain = newStringUninit(mutatedPlain.len)
-            var newPos = 0
-            for c in mutatedPlain:
-                if c != token.arg1:
-                    newPlain[newPos] = c
-                    inc newPos
-            newPlain.setLen(newPos)
-            mutatedPlain = newPlain
+            # var newPlain = newStringUninit(mutatedPlain.len)
+            # var newPos = 0
+            # for c in mutatedPlain:
+            #     if c != token.arg1:
+            #         newPlain[newPos] = c
+            #         inc newPos
+            # newPlain.setLen(newPos)
+            # mutatedPlain = newPlain
+
+            var pos = 0
+            for i in 0..high(mutatedPlain):
+                if mutatedPlain[i] != token.arg1:
+                    mutatedPlain[pos] = mutatedPlain[i]
+                    inc pos
+            mutatedPlain.setLen(pos)
         of opDupFirst:
             if mutatedPlain.len == 0:
                 continue
@@ -503,6 +533,7 @@ iterator getMatchingRules*(rules: seq[seq[Token]], plains: seq[string], target: 
     for plain in plains:
         for rule in rules:
             var mutatedPlain = plain
+            # mutatedPlain.setLen(255)
             applyRule(rule, mutatedPlain)
             if mutatedPlain == target:
                 yield (plain, rule)
