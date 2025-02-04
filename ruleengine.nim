@@ -31,36 +31,44 @@ type
         arg3: char
 
 
+const opTable = {
+    ':': opPassthrough,         'l': opLowercase,            'u': opUppercase,
+    'c': opCapitalize,          'C': opInvCapitalize,        't': opToggleCase,
+    'T': opToggleAt,            'r': opReverse,              'd': opDuplicate,
+    'p': opDuplicateN,          'f': opReflect,              '{': opRotLeft,
+    '}': opRotRight,            '$': opAppend,               '^': opPrepend,
+    '[': opTruncLeft,           ']': opTruncRight,           'D': opDeleteAt,
+    'x': opExtractRange,        'O': opOmitRange,            'i': opInsertAt,
+    'o': opOverwriteAt,         '\'': opTruncAt,             's': opReplace,
+    '@': opPurge,               'z': opDupFirst,             'Z': opDupLast,
+    'q': opDupAll,              'X': opExtractMem,           '4': opAppendMem,
+    '6': opPrependMem,          'M': opMemorize,             '<': opRejectLess,
+    '>': opRejectGreater,       '_': opRejectEqual,          '!': opRejectContain,
+    '/': opRejectNotContain,    '(': opRejectEqualFirst,     ')': opRejectEqualLast,
+    '=': opRejectEqualAt,       '%': opRejectContainsTimes,  'Q': opRejectContainsMemory,
+    'k': opSwapFront,           'K': opSwapBack,             '*': opSwapAt,
+    'L': opBitwiseShiftLeft,    'R': opBitwiseShiftRight,    '+': opAsciiInc,
+    '-': opAsciiDec,            '.': opReplaceNPlus1,        ',': opReplaceNMinus1,
+    'y': opDupBlockFront,       'Y': opDupBlockBack,         'E': opTitle, 
+    'e': opTitleSep,            '3': opToggleSep,            ' ': opNoop
+}.toTable
+
+
 const opLUT = block:
     var result: array[256, Operation]
-
-    var opTable: Table[char, Operation] = {
-        ':': opPassthrough,         'l': opLowercase,            'u': opUppercase,
-        'c': opCapitalize,          'C': opInvCapitalize,        't': opToggleCase,
-        'T': opToggleAt,            'r': opReverse,              'd': opDuplicate,
-        'p': opDuplicateN,          'f': opReflect,              '{': opRotLeft,
-        '}': opRotRight,            '$': opAppend,               '^': opPrepend,
-        '[': opTruncLeft,           ']': opTruncRight,           'D': opDeleteAt,
-        'x': opExtractRange,        'O': opOmitRange,            'i': opInsertAt,
-        'o': opOverwriteAt,         '\'': opTruncAt,             's': opReplace,
-        '@': opPurge,               'z': opDupFirst,             'Z': opDupLast,
-        'q': opDupAll,              'X': opExtractMem,           '4': opAppendMem,
-        '6': opPrependMem,          'M': opMemorize,             '<': opRejectLess,
-        '>': opRejectGreater,       '_': opRejectEqual,          '!': opRejectContain,
-        '/': opRejectNotContain,    '(': opRejectEqualFirst,     ')': opRejectEqualLast,
-        '=': opRejectEqualAt,       '%': opRejectContainsTimes,  'Q': opRejectContainsMemory,
-        'k': opSwapFront,           'K': opSwapBack,             '*': opSwapAt,
-        'L': opBitwiseShiftLeft,    'R': opBitwiseShiftRight,    '+': opAsciiInc,
-        '-': opAsciiDec,            '.': opReplaceNPlus1,        ',': opReplaceNMinus1,
-        'y': opDupBlockFront,       'Y': opDupBlockBack,         'E': opTitle, 
-        'e': opTitleSep,            '3': opToggleSep,            ' ': opNoop
-        
-    }.toTable
 
     for i in 0..255:
         result[i] = opTable.getOrDefault(chr(i), opInvalid)
 
     result
+
+const opDecLUT = block:
+    var result: array[256, char]
+
+    for i in 0..255:
+        result[int(opTable.getOrDefault(chr(i), opInvalid))] = chr(i)
+
+    result    
 
 # Those LUTs seem to be faster than those branchless versions I use to fill the table or built-in Nim functions
 const toggleCaseLUT = block:
@@ -97,6 +105,16 @@ proc chrToInt(c: char): int {.inline.} =
         return int(uint8(c) - uint8('A') + 10)
     else:
         return -1
+
+proc intToChr(c: char): char {.inline.} =
+    let n = uint8(c)
+    case n
+    of 0..9:
+        return chr(uint8('0') + n)
+    of 10..35:
+        return chr(uint8('A') + n - 10)
+    else:
+        return '\xFF'
 
 
 proc tokenizeRule*(rule: string, includeUnsupported: bool = true): seq[Token] = 
@@ -197,6 +215,71 @@ proc tokenizeRules*(rules: seq[string], includeUnsupported: bool = true): seq[se
             continue
 
         result.add(tokenizedRule)
+
+
+proc decodeRules*(rules: seq[seq[Token]]): seq[string] =
+    # Turns tokenized rules back into plaintext
+    for rule in rules:
+        var strRule = newStringOfCap(128)
+        var argCount: int
+        var argTypes: array[3, ArgType] = [argNone, argNone, argNone]
+        var args: array[3, char] = ['\0', '\0', '\0']
+        for token in rule:
+            if strRule.len > 0:
+                strRule.add ' '
+
+            case token.op
+            of opInvalid:
+                strRule = ""
+                break
+
+            of opNoop:
+                continue
+
+            of opPassthrough, opLowercase, opUppercase, opCapitalize, opInvCapitalize, opToggleCase,
+                opReverse, opDuplicate, opReflect, opRotLeft, opRotRight, opTruncLeft, opTruncRight,
+                opDupAll, opSwapBack, opSwapFront, opTitle, opAppendMem, opPrependMem, opMemorize,
+                opRejectContainsMemory:
+
+                argCount = 0
+
+            of opToggleAt, opDuplicateN, opDeleteAt, opTruncAt, opDupFirst, opDupLast, opBitwiseShiftLeft,
+                opBitwiseShiftRight, opAsciiInc, opAsciiDec, opReplaceNMinus1, opReplaceNPlus1, 
+                opDupBlockFront, opDupBlockBack, opRejectLess, opRejectGreater, opRejectEqual:
+                argCount = 1
+                argTypes = [argInt, argNone, argNone]
+            
+            of opAppend, opPrepend, opPurge, opTitleSep, opRejectContain, opRejectNotContain, opRejectEqualFirst, opRejectEqualLast:
+                argCount = 1
+                argTypes = [argChar, argNone, argNone]
+
+            of opExtractRange, opOmitRange, opSwapAt:
+                argCount = 2
+                argTypes = [argInt, argInt, argNone]
+
+            of opInsertAt, opOverwriteAt, opToggleSep, opRejectEqualAt, opRejectContainsTimes:
+                argCount = 2
+                argTypes = [argInt, argChar, argNone]
+
+            of opReplace:
+                argCount = 2
+                argTypes = [argChar, argChar, argNone]        
+
+            of opExtractMem:
+                argCount = 3
+                argTypes = [argChar, argChar, argChar]
+
+            strRule.add opDecLUT[int(token.op)]
+            
+            args = [token.arg1, token.arg2, token.arg3]
+
+            for i in 0..<argCount:
+                if argTypes[i] == argInt:
+                    strRule.add intToChr(args[i])
+                else:
+                    strRule.add args[i]
+        
+        result.add strRule
 
 
 proc applyRule*(rule: seq[Token], mutatedPlain: var string) =
@@ -403,17 +486,13 @@ proc applyRule*(rule: seq[Token], mutatedPlain: var string) =
         of opSwapFront:
             if mutatedPlain.len < 2:
                 continue
-
-            var t = mutatedPlain[1]
-            mutatedPlain[1] = mutatedPlain[0]
-            mutatedPlain[0] = t
+            
+            swap(mutatedPlain[0], mutatedPlain[1])
         of opSwapBack:
             if mutatedPlain.len < 2:
                 continue
-
-            var t = mutatedPlain[^1]
-            mutatedPlain[^1] = mutatedPlain[^2]
-            mutatedPlain[^2] = t
+            
+            swap(mutatedPlain[^2], mutatedPlain[^1])
         of opSwapAt:
             if mutatedPlain.len < 2:
                 continue
@@ -424,9 +503,7 @@ proc applyRule*(rule: seq[Token], mutatedPlain: var string) =
             if pos1 > mutatedPlain.high or pos2 > mutatedPlain.high:
                 continue
 
-            var t = mutatedPlain[pos1]
-            mutatedPlain[pos1] = mutatedPlain[pos2]
-            mutatedPlain[pos2] = t
+            swap(mutatedPlain[pos1], mutatedPlain[pos2])
         of opBitwiseShiftLeft:
             let pos = int(token.arg1)
             if pos > mutatedPlain.high:
@@ -540,8 +617,10 @@ iterator getMatchingRules*(rules: seq[seq[Token]], plains: seq[string], target: 
 
 
 proc main() =
-    # echo tokenizeRule("$0 $0 $\\xC2 $\\xA3", false)
-    # quit()
+    #let rule = tokenizeRule("$0 $0 $\\xC2 $\\xA3 clk", false)
+    #echo rule
+    #echo decodeRules(@[rule])
+    #quit()
 
     var rules = lines("dedup.rule").toSeq
 
@@ -560,6 +639,24 @@ proc main() =
     #quit()  
 
     echo "Spent on tokenization: ", (endTime - beginTime).inMilliseconds, " milliseconds"
+
+    beginTime = getMonoTime()
+    var decodedRules = decodeRules(tokenizedRules)
+    endTime = getMonoTime()
+
+    echo "Spent on decoding: ", (endTime - beginTime).inMilliseconds, " milliseconds"
+
+    # var retokenizedRules = tokenizeRules(decodedRules, false)
+
+    # for i in 0..high(tokenizedRules):
+    #     if not (tokenizedRules[i] == retokenizedRules[i]):
+    #         echo "Decoding error: "
+    #         echo tokenizedRules[i]
+    #         echo decodedRules[i]
+    #         echo retokenizedRules[i]
+    #         quit()
+
+    # quit()
 
     for i in 1..10:
         beginTime = getMonoTime()
