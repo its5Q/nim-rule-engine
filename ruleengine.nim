@@ -2,7 +2,7 @@ when compileOption("profiler"):
   import std/nimprof
 
 include constants
-import std/[sequtils, monotimes, times, strutils, algorithm, enumerate]
+import std/[sequtils, monotimes, times, strutils, algorithm, enumerate, os]
 
 proc chrToInt(c: char): int {.inline.} =
     case c
@@ -100,35 +100,37 @@ proc tokenizeRules*(rules: seq[string], includeUnsupported: bool = true): seq[se
         result.add(tokenizedRule)
 
 
+proc decodeRule*(rule: seq[Token]): string =
+    ## Accepts a single tokenized rule and returns it decoded back into string form
+    var argCount: int
+    var argTypes: array[3, ArgType] = [argNone, argNone, argNone]
+    var args: array[3, char] = ['\0', '\0', '\0']
+    for token in rule:
+        if result.len > 0:
+            result.add ' '
+
+        (argCount, argTypes) = getOpConfig(token.op)
+
+        if argCount == -1:
+            continue
+        elif unlikely(argCount == -2):
+            result.setLen(0)
+            return
+
+        result.add opDecLUT[int(token.op)]
+        args = [token.arg1, token.arg2, token.arg3]
+
+        for i in 0..<argCount:
+            if argTypes[i] == argInt:
+                result.add intToChr(args[i])
+            else:
+                result.add args[i]
+
+
 proc decodeRules*(rules: seq[seq[Token]]): seq[string] =
-    ## Accepts a sequence of tokenized rules and returns a sequence of those rules in text form
-    for rule in rules:
-        var strRule = newStringOfCap(256)
-        var argCount: int
-        var argTypes: array[3, ArgType] = [argNone, argNone, argNone]
-        var args: array[3, char] = ['\0', '\0', '\0']
-        for token in rule:
-            if strRule.len > 0:
-                strRule.add ' '
-
-            (argCount, argTypes) = getOpConfig(token.op)
-
-            if argCount == -1:
-                continue
-            elif unlikely(argCount == -2):
-                strRule.setLen(0)
-                break
-
-            strRule.add opDecLUT[int(token.op)]
-            args = [token.arg1, token.arg2, token.arg3]
-
-            for i in 0..<argCount:
-                if argTypes[i] == argInt:
-                    strRule.add intToChr(args[i])
-                else:
-                    strRule.add args[i]
-        
-        result.add strRule
+    ## Accepts multiple tokenized rules and returns them decoded back into string form
+    for rule in rules:        
+        result.add decodeRule(rule)
 
 
 proc applyRule*(rule: seq[Token], mutatedPlain: var string) =
@@ -540,6 +542,10 @@ when isMainModule:
             else:
                 writeLine(stderr, "Skipping empty or invalid rule: " & rule)
         else:
+            if not fileExists(rules_file):
+                writeLine(stderr, "Rules file doesn't exist, quitting.")
+                quit(2)
+
             for ruleLine in readLinesIter(rules_file):
                 var tokenizedRule = tokenizeRule(ruleLine, false)
                 if tokenizedRule.len > 0:
@@ -555,6 +561,10 @@ when isMainModule:
                     writeLine(stdout, mutatedPlain)
         elif not plains_file.isEmptyOrWhitespace:
             var mutatedPlain: string
+            if not fileExists(plains_file):
+                writeLine(stderr, "Plains file doesn't exist, quitting.")
+                quit(2)
+
             for plain in readLinesIter(plains_file):
                 for rule in tokenizedRules:
                     mutatedPlain = plain
@@ -571,5 +581,46 @@ when isMainModule:
                         writeLine(stdout, mutatedPlain)
 
         flushFile(stdout)
+
+    proc normalizeRulesCli(rules_file: string = "") = 
+        ## Parses input rules and normalizes them by splitting each function in a rule by a single space, skipping invalid or unsupported rules.
+        var inputFile: File
+        if not rules_file.isEmptyOrWhitespace:
+            if not fileExists(rules_file):
+                writeLine(stderr, "Rules file doesn't exist, quitting.")
+                quit(2)
+            
+            inputFile = open(rules_file, fmRead)
+        else:
+            inputFile = stdin
+
+        var ruleLine: string
+        while inputFile.readLine(ruleLine):
+            var tokenizedRule = tokenizeRule(ruleLine, false)
+            if tokenizedRule.len > 0:
+                writeLine(stdout, decodeRule(tokenizedRule))
+            else:
+                writeLine(stderr, "Skipping empty or invalid rule: " & ruleLine)
+
+        flushFile(stdout)
     
-    dispatchMulti([generateCandidatesCli, cmdName = "gen", short={"rules_file": 'r', "rule": 'j', "plain": 'p', "plains_file": 'f'}, help={"rules_file": "Path to a file with hashcat rules. Either this or the --rule argument must be specified", "rule": "A single hashcat rule to be used", "plain": "A single plaintext to be mutated", "plains_file": "Path to a file with a list of plains to be mutated"}]) 
+    dispatchMulti(
+        [
+            generateCandidatesCli, 
+            cmdName = "gen", 
+            short={"rules_file": 'r', "rule": 'j', "plain": 'p', "plains_file": 'f'},
+            help={
+                "rules_file": "Path to a file with hashcat rules. Either this or the --rule argument must be specified",
+                "rule": "A single hashcat rule to be used", "plain": "A single plaintext to be mutated",
+                "plains_file": "Path to a file with a list of plains to be mutated"
+            }
+        ],
+        [
+            normalizeRulesCli,
+            cmdName = "normalize",
+            short={"rules_file": 'r'},
+            help={
+                "rules_file": "Path to a rules file to be normalized. stdin if not specified" 
+            }
+        ]
+    ) 
