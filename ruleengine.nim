@@ -13,6 +13,7 @@ proc chrToInt(c: char): int {.inline.} =
     else:
         return -1
 
+
 proc intToChr(c: char): char {.inline.} =
     let n = uint8(c)
     case n
@@ -24,7 +25,17 @@ proc intToChr(c: char): char {.inline.} =
         return '\xFF'
 
 
+iterator readLinesIter(filename: string): string =
+    var f = open(filename, fmRead)
+    defer: f.close
+
+    var line: string
+    while f.readLine(line):
+        yield line
+
+
 proc tokenizeRule*(rule: string, includeUnsupported: bool = true): seq[Token] = 
+    ## Parses a single rule string into tokens
     var pos = 0
     var argCount: int
     var argTypes: array[3, ArgType] = [argNone, argNone, argNone]
@@ -78,8 +89,8 @@ proc tokenizeRule*(rule: string, includeUnsupported: bool = true): seq[Token] =
         result.add Token(op: op, arg1: args[0], arg2: args[1], arg3: args[2])
 
 
-# Separate function for multiple rules to eliminate overhead when calling from Python
 proc tokenizeRules*(rules: seq[string], includeUnsupported: bool = true): seq[seq[Token]] =
+    ## Tokenizes multiple string rules, exists to eliminate overhead when calling from Python
     for i, rule in enumerate(rules):
         let tokenizedRule = tokenizeRule(rule, includeUnsupported)
         if unlikely(tokenizedRule.len == 0):
@@ -90,9 +101,9 @@ proc tokenizeRules*(rules: seq[string], includeUnsupported: bool = true): seq[se
 
 
 proc decodeRules*(rules: seq[seq[Token]]): seq[string] =
-    # Turns tokenized rules back into plaintext
+    ## Accepts a sequence of tokenized rules and returns a sequence of those rules in text form
     for rule in rules:
-        var strRule = newStringOfCap(128)
+        var strRule = newStringOfCap(256)
         var argCount: int
         var argTypes: array[3, ArgType] = [argNone, argNone, argNone]
         var args: array[3, char] = ['\0', '\0', '\0']
@@ -121,6 +132,7 @@ proc decodeRules*(rules: seq[seq[Token]]): seq[string] =
 
 
 proc applyRule*(rule: seq[Token], mutatedPlain: var string) =
+    ## Accepts a single rule and a string by reference to be mutated by that rule
     for token in rule:
         #echo "Plain before processing token: ", mutatedPlain
         #echo "Processing token: ", token
@@ -437,6 +449,7 @@ proc applyRule*(rule: seq[Token], mutatedPlain: var string) =
 
 
 iterator applyRules*(rules: seq[seq[Token]], plains: seq[string]): string =
+    ## An iterator that applies a list of tokenized rules to multiple plains and yields them one by one
     for plain in plains:
         for rule in rules:
             var mutatedPlain = plain
@@ -445,6 +458,7 @@ iterator applyRules*(rules: seq[seq[Token]], plains: seq[string]): string =
 
 
 iterator getMatchingRules*(rules: seq[seq[Token]], plains: seq[string], target: string): (string, seq[Token]) =
+    ## An iterator that applies a list of tokenized rules to multiple plains and yield the rules that match the specified target string
     for plain in plains:
         for rule in rules:
             var mutatedPlain = plain
@@ -504,6 +518,58 @@ proc main() =
 
         echo "Spent on applying rules: ", (endTime - beginTime).inMilliseconds, " milliseconds"
         # echo int(plains.len / (endTime - beginTime).inMilliseconds * 1000), " candidates/s"
+    
 
+when isMainModule:
+    import cligen
 
-main()
+    proc generateCandidatesCli(rules_file: string = "", rule: string = "", plain: string = "", plains_file: string = "") = 
+        ## Generates password candidates with specified rules. Either a rule file path or a single rule must be specified.
+        ## If no plain or plain file path is provided, the plains will be read from stdin.
+        if rules_file.isEmptyOrWhitespace and rule.isEmptyOrWhitespace:
+            writeLine(stderr, "No rule or rule file has been specified. See help for details.")
+            quit()
+
+        var mutatedPlain: string
+        var tokenizedRules: seq[seq[Token]]
+
+        if not rule.isEmptyOrWhitespace:
+            var tokenizedRule = tokenizeRule(rule, false)
+            if tokenizedRule.len > 0:
+                tokenizedRules.add tokenizedRule
+            else:
+                writeLine(stderr, "Skipping empty or invalid rule: " & rule)
+        else:
+            for ruleLine in readLinesIter(rules_file):
+                var tokenizedRule = tokenizeRule(ruleLine, false)
+                if tokenizedRule.len > 0:
+                    tokenizedRules.add tokenizedRule
+                else:
+                    writeLine(stderr, "Skipping empty or invalid rule: " & ruleLine)
+                
+        if not plain.isEmptyOrWhitespace:
+            for rule in tokenizedRules:
+                mutatedPlain = plain
+                applyRule(rule, mutatedPlain)
+                if mutatedPlain.len > 0:
+                    writeLine(stdout, mutatedPlain)
+        elif not plains_file.isEmptyOrWhitespace:
+            var mutatedPlain: string
+            for plain in readLinesIter(plains_file):
+                for rule in tokenizedRules:
+                    mutatedPlain = plain
+                    applyRule(rule, mutatedPlain)
+                    if mutatedPlain.len > 0:
+                        writeLine(stdout, mutatedPlain)
+        else:
+            var origPlain: string
+            while stdin.readLine(origPlain):
+                for rule in tokenizedRules:
+                    mutatedPlain = origPlain
+                    applyRule(rule, mutatedPlain)
+                    if mutatedPlain.len > 0:
+                        writeLine(stdout, mutatedPlain)
+
+        flushFile(stdout)
+    
+    dispatchMulti([generateCandidatesCli, cmdName = "gen", short={"rules_file": 'r', "rule": 'j', "plain": 'p', "plains_file": 'f'}, help={"rules_file": "Path to a file with hashcat rules. Either this or the --rule argument must be specified", "rule": "A single hashcat rule to be used", "plain": "A single plaintext to be mutated", "plains_file": "Path to a file with a list of plains to be mutated"}]) 

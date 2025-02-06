@@ -3,3 +3,5 @@ nimblecache/
 htmldocs/
 ruleengine
 ruleengine.exe
+*.rule
+*.txt
