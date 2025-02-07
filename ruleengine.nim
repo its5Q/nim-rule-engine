@@ -468,58 +468,6 @@ iterator getMatchingRules*(rules: seq[seq[Token]], plains: seq[string], target: 
             applyRule(rule, mutatedPlain)
             if mutatedPlain == target:
                 yield (plain, rule)
-
-
-proc main() =
-    #let rule = tokenizeRule("$0 $0 $\\xC2 $\\xA3 clk", false)
-    #echo rule
-    #echo decodeRules(@[rule])
-    #quit()
-
-    var rules = lines("dedup.rule").toSeq
-
-    var beginTime = getMonoTime()
-    var tokenizedRules = tokenizeRules(rules, false)
-    var endTime = getMonoTime()
-
-    # quit()
-
-    #for rule in tokenizedRules:
-    #    echo rule
-
-    #for candidate in applyRules(tokenizedRules, @["P@s$ w0rD-123!"]):
-    #    echo candidate
-
-    #quit()  
-
-    echo "Spent on tokenization: ", (endTime - beginTime).inMilliseconds, " milliseconds"
-
-    beginTime = getMonoTime()
-    var decodedRules = decodeRules(tokenizedRules)
-    endTime = getMonoTime()
-
-    echo "Spent on decoding: ", (endTime - beginTime).inMilliseconds, " milliseconds"
-
-    # var retokenizedRules = tokenizeRules(decodedRules, false)
-
-    # for i in 0..high(tokenizedRules):
-    #     if not (tokenizedRules[i] == retokenizedRules[i]):
-    #         echo "Decoding error: "
-    #         echo tokenizedRules[i]
-    #         echo decodedRules[i]
-    #         echo retokenizedRules[i]
-    #         quit()
-
-    # quit()
-
-    for i in 1..10:
-        beginTime = getMonoTime()
-        # var plains = applyRules(tokenizedRules, @["P@s$ w0rD-123!", "123456789joao", "andreas_walter_"]).toSeq
-        echo getMatchingRules(tokenizedRules, @["P@s$ w0rD-123!", "123456789joao", "andreas_walter_"], "walter_white").toSeq
-        endTime = getMonoTime()
-
-        echo "Spent on applying rules: ", (endTime - beginTime).inMilliseconds, " milliseconds"
-        # echo int(plains.len / (endTime - beginTime).inMilliseconds * 1000), " candidates/s"
     
 
 when isMainModule:
@@ -582,6 +530,7 @@ when isMainModule:
 
         flushFile(stdout)
 
+
     proc normalizeRulesCli(rules_file: string = "") = 
         ## Parses input rules and normalizes them by splitting each function in a rule by a single space, skipping invalid or unsupported rules.
         var inputFile: File
@@ -603,6 +552,90 @@ when isMainModule:
                 writeLine(stderr, "Skipping empty or invalid rule: " & ruleLine)
 
         flushFile(stdout)
+
+
+    proc benchmarkCli(rules_file: string) = 
+        ## Measures tokenization, decoding and rule matching speed on a specified rules file
+        if not fileExists(rules_file):
+            writeLine(stderr, "Rules files doesn't exists, quitting")
+            quit(2)
+
+        var rules = readLinesIter(rules_file).toSeq
+
+        var beginTime = getMonoTime()
+        var tokenizedRules = tokenizeRules(rules, false)
+        var endTime = getMonoTime()
+
+        var spent = (endTime - beginTime).inMicroseconds
+
+        echo "Spent on tokenization: ", spent / 1000, " milliseconds"
+        echo "Speed: ", float(tokenizedRules.len) / (spent / 1000000), " rules/s"
+        echo()
+
+        beginTime = getMonoTime()
+        var decodedRules = decodeRules(tokenizedRules)
+        endTime = getMonoTime()
+
+        spent = (endTime - beginTime).inMicroseconds
+
+        echo "Spent on decoding: ", spent / 1000, " milliseconds"
+        echo "Speed: ", float(tokenizedRules.len) / (spent / 1000000), " rules/s"
+        echo()
+
+        var totalSpent = 0
+        for i in 1..10:
+            beginTime = getMonoTime()
+            discard getMatchingRules(tokenizedRules, @["pxpxeif/f5t12", "kc9o0m3*", "h!*2Ting!!2!"], "Ling!!!!").toSeq
+            endTime = getMonoTime()
+
+            spent = (endTime - beginTime).inMicroseconds
+            totalSpent += spent
+
+            echo "(Iteration ", i , ") Spent on matching rules: ", spent / 1000, " milliseconds"
+            echo int(((tokenizedRules.len * 3) / spent) * 1000000), " candidates/s"
+            echo()
+
+        echo "Average matching speed: ", int((float(tokenizedRules.len * 3) / (totalSpent / 10)) * 1000000), " candidates/s"
+
+
+    proc matchingRulesCli(rules_file: string, target: string, plain: string = "", plains_file: string = "") = 
+        ## Finds and outputs rules that match the target string when applied to plains. If plains_file is specified, all plains are loaded into memory.
+        var mutatedPlain: string
+        var tokenizedRules: seq[seq[Token]]
+        var plains: seq[string]
+
+        if not fileExists(rules_file):
+            writeLine(stderr, "Rules file doesn't exist, quitting.")
+            quit(2)
+
+        for ruleLine in readLinesIter(rules_file):
+            var tokenizedRule = tokenizeRule(ruleLine, false)
+            if tokenizedRule.len > 0:
+                tokenizedRules.add tokenizedRule
+            else:
+                writeLine(stderr, "Skipping empty or invalid rule: " & ruleLine)
+        
+
+        if not plain.isEmptyOrWhitespace:
+            plains = @[plain]
+        elif not plains_file.isEmptyOrWhitespace:
+            if not fileExists(plains_file):
+                writeLine(stderr, "Plains file doesn't exist, quitting.")
+                quit(2)
+
+            for plain in readLinesIter(plains_file):
+                plains.add plain
+
+        if plains.len > 0:
+            for _, matchedRule in getMatchingRules(tokenizedRules, plains, target):
+                writeLine(stdout, decodeRule(matchedRule))
+        else:
+            var plain: string
+            while stdin.readLine(plain):
+                for _, matchedRule in getMatchingRules(tokenizedRules, @[plain], target):
+                    writeLine(stdout, decodeRule(matchedRule))
+
+        flushFile(stdout)
     
     dispatchMulti(
         [
@@ -621,6 +654,17 @@ when isMainModule:
             short={"rules_file": 'r'},
             help={
                 "rules_file": "Path to a rules file to be normalized. stdin if not specified" 
+            }
+        ],
+        [benchmarkCli],
+        [
+            matchingRulesCli,
+            cmdName = "match",
+            short={"rules_file": 'r', "plain": 'p', "plains_file": 'f', "target": 't'},
+            help={
+                "rules_file": "Path to a rules file to be used for matching",
+                "plains_file": "Path to a file with a list of plains to be mutated and matched against the target. If plains_file or plain are not specified, plains are read from stdin",
+                "target": "The target string for the rules to match"
             }
         ]
     ) 
